@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const { Redis } = require('@upstash/redis');
 const ffmpegPath = require('ffmpeg-static');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
@@ -14,12 +13,7 @@ const { pipeline } = require('stream/promises');
 const run = promisify(execFile);
 const app = express();
 app.use(cors());
-
-// Подключаемся к базе
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+app.use(express.json({ limit: '10mb' })); // Чтобы принимать JSON с массивом дублей
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://akhmovane-zeta.vercel.app';
 
@@ -46,7 +40,6 @@ function parseVtt(text) {
   return cues;
 }
 
-// Загрузка файлов через потоки (Stream) без забивания оперативной памяти
 async function downloadFile(url, dest) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch ${url}`);
@@ -54,20 +47,17 @@ async function downloadFile(url, dest) {
   await pipeline(Readable.fromWeb(res.body), fileStream);
 }
 
-app.get('/api/reel/:code', async (req, res) => {
-  const { code } = req.params;
-  const { videoUrl, vttUrl } = req.query;
+// Теперь это POST-запрос, принимающий outtakes в теле
+app.post('/api/reel', async (req, res) => {
+  const { videoUrl, vttUrl, outtakes } = req.body;
 
-  if (!videoUrl || !vttUrl) {
-    return res.status(400).json({ error: "Missing videoUrl or vttUrl parameters" });
+  if (!videoUrl || !vttUrl || !Array.isArray(outtakes)) {
+    return res.status(400).json({ error: "Missing parameters or outtakes" });
   }
 
   let dir;
   try {
-    const room = await redis.get(`room:${code}`);
-    if (!room) return res.status(404).json({ error: "ოთახი ვერ მოიძებნა." });
-
-    const list = [...(room.outtakes || [])].sort((a, b) => a.cue - b.cue);
+    const list = [...outtakes].sort((a, b) => a.cue - b.cue);
     if (!list.length) return res.status(400).json({ error: "აუთთეიქები ჯერ არ არის." });
 
     dir = await mkdtemp(path.join(os.tmpdir(), "akhovane-render-"));
@@ -89,7 +79,7 @@ app.get('/api/reel/:code', async (req, res) => {
       if (!c) continue;
       
       const dur = c.end - c.start;
-      const ext = o.type.includes("mp4") ? "m4a" : o.type.includes("ogg") ? "ogg" : "webm";
+      const ext = o.type?.includes("mp4") ? "m4a" : o.type?.includes("ogg") ? "ogg" : "webm";
       const audioPath = path.join(dir, `a${n}.${ext}`);
       const segPath = `s${n}.mp4`;
 
@@ -118,9 +108,7 @@ app.get('/api/reel/:code', async (req, res) => {
 
     const finalPath = path.join(dir, "reel.mp4");
     
-    // Отправляем файл пользователю напрямую с диска через поток
     res.sendFile(finalPath, (err) => {
-      // Папка с временными файлами удаляется только после успешной отправки видео
       rm(dir, { recursive: true, force: true }).catch(() => {});
     });
 
