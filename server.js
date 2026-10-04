@@ -4,24 +4,25 @@ const { Redis } = require('@upstash/redis');
 const ffmpegPath = require('ffmpeg-static');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
-const { mkdtemp, rm, writeFile, readFile } = require('fs/promises');
+const { mkdtemp, rm } = require('fs/promises');
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 
 const run = promisify(execFile);
 const app = express();
 app.use(cors());
 
-// Подключаемся к базе с лобби
+// Подключаемся к базе
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// URL твоего сайта на Vercel (чтобы микросервис мог скачать исходники видео и субтитры)
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://akhmovane-zeta.vercel.app';
 
-// Простой парсер субтитров
 function parseVtt(text) {
   const cues = [];
   const blocks = text.trim().split(/\r?\n\r?\n/);
@@ -45,23 +46,23 @@ function parseVtt(text) {
   return cues;
 }
 
-// Помощник для скачивания файлов (видео, субтитров, аудио из Blob)
+// Загрузка файлов через потоки (Stream) без забивания оперативной памяти
 async function downloadFile(url, dest) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch ${url}`);
-  const buffer = Buffer.from(await res.arrayBuffer());
-  await writeFile(dest, buffer);
+  const fileStream = fs.createWriteStream(dest);
+  await pipeline(Readable.fromWeb(res.body), fileStream);
 }
 
-// Главный роут для генерации видео
 app.get('/api/reel/:code', async (req, res) => {
   const { code } = req.params;
-  const { videoUrl, vttUrl } = req.query; // Ожидаем пути, например: /videos/scene.mp4
+  const { videoUrl, vttUrl } = req.query;
 
   if (!videoUrl || !vttUrl) {
     return res.status(400).json({ error: "Missing videoUrl or vttUrl parameters" });
   }
 
+  let dir;
   try {
     const room = await redis.get(`room:${code}`);
     if (!room) return res.status(404).json({ error: "ოთახი ვერ მოიძებნა." });
@@ -69,70 +70,66 @@ app.get('/api/reel/:code', async (req, res) => {
     const list = [...(room.outtakes || [])].sort((a, b) => a.cue - b.cue);
     if (!list.length) return res.status(400).json({ error: "აუთთეიქები ჯერ არ არის." });
 
-    const dir = await mkdtemp(path.join(os.tmpdir(), "akhovane-render-"));
+    dir = await mkdtemp(path.join(os.tmpdir(), "akhovane-render-"));
 
-    try {
-      const videoPath = path.join(dir, 'source.mp4');
-      const vttPath = path.join(dir, 'subs.vtt');
+    const videoPath = path.join(dir, 'source.mp4');
+    const vttPath = path.join(dir, 'subs.vtt');
+    
+    await Promise.all([
+      downloadFile(FRONTEND_URL + videoUrl, videoPath),
+      downloadFile(FRONTEND_URL + vttUrl, vttPath)
+    ]);
+
+    const vttText = await fs.promises.readFile(vttPath, 'utf8');
+    const cues = parseVtt(vttText);
+    const segs = [];
+
+    for (const [n, o] of list.entries()) {
+      const c = cues[o.cue];
+      if (!c) continue;
       
-      // 1. Скачиваем оригинальное видео и субтитры с твоего Vercel сайта
-      await Promise.all([
-        downloadFile(FRONTEND_URL + videoUrl, videoPath),
-        downloadFile(FRONTEND_URL + vttUrl, vttPath)
-      ]);
+      const dur = c.end - c.start;
+      const ext = o.type.includes("mp4") ? "m4a" : o.type.includes("ogg") ? "ogg" : "webm";
+      const audioPath = path.join(dir, `a${n}.${ext}`);
+      const segPath = `s${n}.mp4`;
 
-      const vttText = await readFile(vttPath, 'utf8');
-      const cues = parseVtt(vttText);
-      const segs = [];
+      await downloadFile(o.url, audioPath);
 
-      // 2. Обрабатываем каждый кусок
-      for (const [n, o] of list.entries()) {
-        const c = cues[o.cue];
-        if (!c) continue;
-        
-        const dur = c.end - c.start;
-        const ext = o.type.includes("mp4") ? "m4a" : o.type.includes("ogg") ? "ogg" : "webm";
-        const audioPath = path.join(dir, `a${n}.${ext}`);
-        const segPath = `s${n}.mp4`;
-
-        await downloadFile(o.url, audioPath);
-
-        // 3. Вырезаем кусок с новым аудио
-        await run(ffmpegPath, [
-          "-y", "-ss", String(c.start), "-t", String(dur), "-i", videoPath,
-          "-ss", String(o.offset), "-i", audioPath,
-          "-map", "0:v:0", "-map", "1:a:0", "-t", String(dur),
-          "-vf", "fps=30", "-c:v", "libx264", "-preset", "veryfast",
-          "-pix_fmt", "yuv420p", "-af", "apad", "-ar", "44100", "-ac", "2", "-c:a", "aac", "-b:a", "160k",
-          segPath
-        ], { cwd: dir });
-
-        segs.push(segPath);
-      }
-
-      if (!segs.length) throw new Error("No segments generated");
-
-      const listPath = path.join(dir, "list.txt");
-      await writeFile(listPath, segs.map(s => `file '${s}'`).join("\n"));
-
-      // 4. Склеиваем всё вместе
       await run(ffmpegPath, [
-        "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "-movflags", "+faststart", "reel.mp4"
+        "-y", "-ss", String(c.start), "-t", String(dur), "-i", videoPath,
+        "-ss", String(o.offset), "-i", audioPath,
+        "-map", "0:v:0", "-map", "1:a:0", "-t", String(dur),
+        "-vf", "fps=30", "-c:v", "libx264", "-preset", "veryfast",
+        "-pix_fmt", "yuv420p", "-af", "apad", "-ar", "44100", "-ac", "2", "-c:a", "aac", "-b:a", "160k",
+        segPath
       ], { cwd: dir });
 
-      const finalReel = await readFile(path.join(dir, "reel.mp4"));
-      
-      // 5. Отдаем видео клиенту
-      res.setHeader('Content-Type', 'video/mp4');
-      res.send(finalReel);
-
-    } finally {
-      // Очищаем временную папку на сервере
-      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      segs.push(segPath);
     }
+
+    if (!segs.length) throw new Error("No segments generated");
+
+    const listPath = path.join(dir, "list.txt");
+    await fs.promises.writeFile(listPath, segs.map(s => `file '${s}'`).join("\n"));
+
+    await run(ffmpegPath, [
+      "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "-movflags", "+faststart", "reel.mp4"
+    ], { cwd: dir });
+
+    const finalPath = path.join(dir, "reel.mp4");
+    
+    // Отправляем файл пользователю напрямую с диска через поток
+    res.sendFile(finalPath, (err) => {
+      // Папка с временными файлами удаляется только после успешной отправки видео
+      rm(dir, { recursive: true, force: true }).catch(() => {});
+    });
+
   } catch (error) {
     console.error("FFmpeg Error:", error);
-    res.status(500).json({ error: "აუთთეიქების ვიდეოს შექმნა ვერ მოხერხდა." });
+    if (dir) rm(dir, { recursive: true, force: true }).catch(() => {});
+    if (!res.headersSent) {
+      res.status(500).json({ error: "აუთთეიქების ვიდეოს შექმნა ვერ მოხერხდა." });
+    }
   }
 });
 
