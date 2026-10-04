@@ -15,7 +15,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Жестко задаем ссылку, чтобы исключить любые проблемы с env-переменными на Render
 const FRONTEND_URL = 'https://akhmovane-zeta.vercel.app';
 console.log("=== FRONTEND_URL IS:", FRONTEND_URL);
 
@@ -43,8 +42,17 @@ function parseVtt(text) {
 }
 
 async function downloadFile(url, dest) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+  const safeBase = 'https://akhmovane-zeta.vercel.app';
+  let finalUrl = url;
+  
+  if (!url || url.includes('undefined')) {
+    finalUrl = safeBase + "/videos/kaichemodzmao.mp4";
+  } else if (url.startsWith('/')) {
+    finalUrl = safeBase + url;
+  }
+
+  const res = await fetch(finalUrl);
+  if (!res.ok) throw new Error(`Failed to fetch ${finalUrl}`);
   const fileStream = fs.createWriteStream(dest);
   await pipeline(Readable.fromWeb(res.body), fileStream);
 }
@@ -52,7 +60,6 @@ async function downloadFile(url, dest) {
 app.post('/api/reel', async (req, res) => {
   let { videoUrl, vttUrl, outtakes } = req.body;
 
-  // Жесткая защита от undefined, null или строковых значений "undefined"
   if (!videoUrl || videoUrl === "undefined") videoUrl = "/videos/kaichemodzmao.mp4";
   if (!vttUrl || vttUrl === "undefined") vttUrl = "/subtitles/kaichemodzmao.vtt";
 
@@ -71,8 +78,8 @@ app.post('/api/reel', async (req, res) => {
     const vttPath = path.join(dir, 'subs.vtt');
     
     await Promise.all([
-      downloadFile(FRONTEND_URL + videoUrl, videoPath),
-      downloadFile(FRONTEND_URL + vttUrl, vttPath)
+      downloadFile(videoUrl, videoPath),
+      downloadFile(vttUrl, vttPath)
     ]);
 
     const vttText = await fs.promises.readFile(vttPath, 'utf8');
