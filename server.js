@@ -1,3 +1,5 @@
+const FRONTEND_URL = 'https://akhmovane-zeta.vercel.app';
+console.log("=== CRITICAL DEBUG FRONTEND_URL IS:", FRONTEND_URL);
 const express = require('express');
 const cors = require('cors');
 const ffmpegPath = require('ffmpeg-static');
