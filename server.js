@@ -1,5 +1,3 @@
-const FRONTEND_URL = 'https://akhmovane-zeta.vercel.app';
-console.log("=== CRITICAL DEBUG FRONTEND_URL IS:", FRONTEND_URL);
 const express = require('express');
 const cors = require('cors');
 const ffmpegPath = require('ffmpeg-static');
@@ -15,9 +13,11 @@ const { pipeline } = require('stream/promises');
 const run = promisify(execFile);
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // Чтобы принимать JSON с массивом дублей
+app.use(express.json({ limit: '10mb' }));
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://akhmovane-zeta.vercel.app';
+// Жестко задаем ссылку, чтобы исключить любые проблемы с env-переменными на Render
+const FRONTEND_URL = 'https://akhmovane-zeta.vercel.app';
+console.log("=== FRONTEND_URL IS:", FRONTEND_URL);
 
 function parseVtt(text) {
   const cues = [];
@@ -49,7 +49,6 @@ async function downloadFile(url, dest) {
   await pipeline(Readable.fromWeb(res.body), fileStream);
 }
 
-// Теперь это POST-запрос, принимающий outtakes в теле
 app.post('/api/reel', async (req, res) => {
   const { videoUrl, vttUrl, outtakes } = req.body;
 
