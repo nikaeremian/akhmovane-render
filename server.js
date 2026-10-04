@@ -50,10 +50,14 @@ async function downloadFile(url, dest) {
 }
 
 app.post('/api/reel', async (req, res) => {
-  const { videoUrl, vttUrl, outtakes } = req.body;
+  let { videoUrl, vttUrl, outtakes } = req.body;
 
-  if (!videoUrl || !vttUrl || !Array.isArray(outtakes)) {
-    return res.status(400).json({ error: "Missing parameters or outtakes" });
+  // Жесткая защита от undefined, null или строковых значений "undefined"
+  if (!videoUrl || videoUrl === "undefined") videoUrl = "/videos/kaichemodzmao.mp4";
+  if (!vttUrl || vttUrl === "undefined") vttUrl = "/subtitles/kaichemodzmao.vtt";
+
+  if (!Array.isArray(outtakes)) {
+    return res.status(400).json({ error: "Missing outtakes array" });
   }
 
   let dir;
